@@ -4,6 +4,6 @@
   "description": "This plugin uploads the image in your clipboard to any image hosting automatically when pasting.",
   "author": "Creling",
   "isDesktopOnly": true,
-  "minAppVersion": "0.11.0",
-  "version": "0.1.1"
+  "minAppVersion": "0.15",
+  "version": "0.2"
 }

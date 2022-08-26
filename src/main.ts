@@ -1,14 +1,20 @@
 import {
   Notice,
   Plugin,
-  MarkdownView,
   Editor,
+  MarkdownView,
+  EditorPosition,
 } from "obsidian";
 
-import axios from "axios"
-import objectPath from 'object-path'
-import ImageUploaderSettingTab from './settings-tab'
-import Compressor from 'compressorjs'
+import axios from "axios";
+import objectPath from 'object-path';
+import ImageUploaderSettingTab from './settings-tab';
+import Compressor from 'compressorjs';
+
+import {
+  PasteEventCopy,
+} from './custom-events';
+
 interface ImageUploaderSettings {
   apiEndpoint: string;
   uploadHeader: string;
@@ -27,99 +33,13 @@ const DEFAULT_SETTINGS: ImageUploaderSettings = {
   enableResize: false,
 };
 
-type Handlers = {
-  drop: (cm: CodeMirror.Editor, event: DragEvent) => void;
-  paste: (cm: CodeMirror.Editor, event: ClipboardEvent) => void;
-};
+interface pasteFunction {
+  (this: HTMLElement, event: ClipboardEvent): void;
+}
 
 export default class ImageUploader extends Plugin {
   settings: ImageUploaderSettings;
-
-  private cmAndHandlersMap = new Map<CodeMirror.Editor, Handlers>();
-
-  private getEditor() {
-    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (mdView) {
-      return mdView.editor;
-    } else {
-      return null;
-    }
-  }
-
-  private backupOriginalHandlers(cm: CodeMirror.Editor) {
-    if (!this.cmAndHandlersMap.has(cm)) {
-      this.cmAndHandlersMap.set(cm, {
-        drop: (cm as any)._handlers.drop[0],
-        paste: (cm as any)._handlers.paste[0],
-      });
-    }
-    return this.cmAndHandlersMap.get(cm);
-  }
-
-  setupPasteHandler(): void {
-    this.registerCodeMirror((cm: any) => {
-      const originalPasterHandler = this.backupOriginalHandlers(cm);
-      cm._handlers.paste[0] = async (_: any, e: ClipboardEvent) => {
-        const { files } = e.clipboardData;
-        if (files.length == 0 || !files[0].type.startsWith("image")) {
-          originalPasterHandler.paste(_, e)
-        }
-        else if (this.settings.apiEndpoint && this.settings.uploadHeader && this.settings.imageUrlPath) {
-          for (let file of files) {
-
-            const randomString = (Math.random() * 10086).toString(36).substr(0, 8)
-            const pastePlaceText = `![uploading...](${randomString})\n`
-            this.getEditor().replaceSelection(pastePlaceText)
-
-            const maxWidth = this.settings.maxWidth
-            if (this.settings.enableResize) {
-              const compressedFile = await new Promise((resolve, reject) => {
-                new Compressor(file, {
-                  maxWidth: maxWidth,
-                  success: resolve,
-                  error: reject,
-                })
-              })
-
-              file = compressedFile as File
-            }
-            const formData = new FormData()
-            const uploadBody = JSON.parse(this.settings.uploadBody)
-
-            for (const key in uploadBody) {
-              if (uploadBody[key] == "$FILE") {
-                formData.append(key, file, file.name)
-              }
-              else {
-                formData.append(key, uploadBody[key])
-              }
-            }
-
-            axios.post(this.settings.apiEndpoint, formData, {
-              "headers": JSON.parse(this.settings.uploadHeader)
-            }).then(res => {
-              const url = objectPath.get(res.data, this.settings.imageUrlPath)
-              const imgMarkdownText = `![](${url})`
-              this.replaceText(this.getEditor(), pastePlaceText, imgMarkdownText)
-            }, err => {
-              new Notice(err, 5000)
-              console.log(err)
-              const dataTransfer = new DataTransfer();
-              dataTransfer.items.add(file);
-              const newEvt = new ClipboardEvent("paste", {
-                clipboardData: dataTransfer
-              })
-              originalPasterHandler.paste(_, newEvt)
-            })
-          }
-        }
-        else {
-          new Notice("Image Uploader: Please check the image hosting settings.");
-          originalPasterHandler.paste(_, e);
-        }
-      }
-    })
-  }
+  pasteFunction: pasteFunction;
 
   private replaceText(editor: Editor, target: string, replacement: string): void {
     target = target.trim()
@@ -127,27 +47,92 @@ export default class ImageUploader extends Plugin {
     for (let i = 0; i < lines.length; i++) {
       const ch = lines[i].indexOf(target)
       if (ch !== -1) {
-        const from = { line: i, ch };
-        const to = { line: i, ch: ch + target.length };
+        const from = { line: i, ch: ch } as EditorPosition;
+        const to = { line: i, ch: ch + target.length } as EditorPosition;
+        editor.setCursor(from);
         editor.replaceRange(replacement, from, to);
         break;
       }
     }
   }
 
+  async pasteHandler(ev: ClipboardEvent, editor: Editor, mkView: MarkdownView): Promise<void> {
+    if (ev.defaultPrevented) {
+      console.log("paste event is canceled");
+      return;
+    }
+
+    let file = ev.clipboardData.files[0];
+    const imageType = /image.*/;
+    if (file.type.match(imageType)) {
+
+      ev.preventDefault();
+
+      // set the placeholder text
+      const randomString = (Math.random() * 10086).toString(36).substring(0, 8);
+      const pastePlaceText = `![uploading...](${randomString})\n`
+      editor.replaceSelection(pastePlaceText)
+
+      // resize the image
+      if (this.settings.enableResize) {
+        const maxWidth = this.settings.maxWidth
+        const compressedFile = await new Promise((resolve, reject) => {
+          new Compressor(file, {
+            maxWidth: maxWidth,
+            success: resolve,
+            error: reject,
+          })
+        })
+        file = compressedFile as File
+      }
+
+      // upload the image
+      const formData = new FormData()
+      const uploadBody = JSON.parse(this.settings.uploadBody)
+
+      for (const key in uploadBody) {
+        if (uploadBody[key] == "$FILE") {
+          formData.append(key, file, file.name)
+        }
+        else {
+          formData.append(key, uploadBody[key])
+        }
+      }
+
+      axios.post(this.settings.apiEndpoint, formData, {
+        "headers": JSON.parse(this.settings.uploadHeader)
+      }).then(res => {
+        const url = objectPath.get(res.data, this.settings.imageUrlPath)
+        const imgMarkdownText = `![](${url})`
+        this.replaceText(editor, pastePlaceText, imgMarkdownText)
+      }, err => {
+        new Notice('[Image Uploader] Upload unsuccessfully, fall back to default paste!', 5000)
+        console.log(err)
+        this.replaceText(editor, pastePlaceText, "");
+        console.log(mkView.currentMode)
+        mkView.currentMode.clipboardManager.handlePaste(
+          new PasteEventCopy(ev)
+          );
+      })
+    }
+  }
+
   async onload(): Promise<void> {
     console.log("loading Image Uploader");
     await this.loadSettings();
-    this.setupPasteHandler()
+    // this.setupPasteHandler()
     this.addSettingTab(new ImageUploaderSettingTab(this.app, this));
+
+    this.pasteFunction = this.pasteHandler.bind(this);
+
+    this.registerEvent(
+      this.app.workspace.on('editor-paste', this.pasteFunction)
+    );
   }
 
   onunload(): void {
-    this.cmAndHandlersMap.forEach((hander, cm) => {
-      (cm as any)._handlers.paste[0] = hander.paste;
-    })
+    this.app.workspace.off('editor-paste', this.pasteFunction);
     console.log("unloading Image Uploader");
-
   }
 
   async loadSettings(): Promise<void> {
