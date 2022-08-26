@@ -1,8 +1,22 @@
+# vscode
+.vscode 
+
+# Intellij
+*.iml
+.idea
+
+# npm
 node_modules
-.env
-*-error.log
-package-lock.json
-yarn.lock
-.npmrc
+
+# Don't include the compiled main.js file in the repo.
+# They should be uploaded to GitHub releases instead.
 dist/
-.vscode/
+
+# Exclude sourcemaps
+*.map
+
+# obsidian
+data.json
+
+# Exclude macOS Finder (System Explorer) View States
+.DS_Store
