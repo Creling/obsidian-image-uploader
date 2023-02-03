@@ -4,6 +4,7 @@ import {
   Editor,
   MarkdownView,
   EditorPosition,
+  Menu
 } from "obsidian";
 
 import axios from "axios";
@@ -23,6 +24,8 @@ interface ImageUploaderSettings {
   maxWidth: number;
   enableResize: boolean;
 }
+
+import * as FS from 'fs';
 
 const DEFAULT_SETTINGS: ImageUploaderSettings = {
   apiEndpoint: null,
@@ -60,6 +63,10 @@ export default class ImageUploader extends Plugin {
     if (ev.defaultPrevented) {
       console.log("paste event is canceled");
       return;
+    }
+    if (ev.clipboardData.files.length==0) {
+      console.log("no file is pasted")
+      return
     }
 
     let file = ev.clipboardData.files[0];
@@ -128,10 +135,68 @@ export default class ImageUploader extends Plugin {
     this.registerEvent(
       this.app.workspace.on('editor-paste', this.pasteFunction)
     );
+
+    this.registerEvent(
+      this.app.workspace.on('editor-menu',this.addRightMenu.bind(this))
+    )
+  }
+
+  addRightMenu(menu:Menu,editor:Editor):void{
+    const selection = editor.getSelection();
+
+    if(selection){
+      menu.addItem((item)=>{
+        item
+          .setTitle("Upload Image")
+          .onClick((evt)=>{
+            if(selection.lastIndexOf('.')==-1){
+              new Notice('[Image Uploader] No correct image file chosen', 3000)
+              console.log('no image found')
+              return              
+            }
+            const ext = selection.substr(selection.lastIndexOf('.'))
+            if(!FS.existsSync(selection)){
+              new Notice('[Image Uploader] No correct image file chosen', 3000)
+              console.log('no image found')
+              return
+            }
+            //todo: 是否要应用它的resize方法？
+            const blob = new Blob([FS.readFileSync(selection)]) 
+
+            // upload the image
+            const formData = new FormData()
+            const uploadBody = JSON.parse(this.settings.uploadBody)
+
+            for (const key in uploadBody) {
+              if (uploadBody[key] == "$FILE") {
+                formData.append(key, blob,`tmp${ext}`)
+              }
+              else {
+                formData.append(key, uploadBody[key])
+              }
+            }
+
+            axios.post(this.settings.apiEndpoint, formData, {
+              "headers": JSON.parse(this.settings.uploadHeader)
+            }).then(res => {
+              const url = objectPath.get(res.data, this.settings.imageUrlPath)
+              const imgMarkdownText = `${url}`
+              this.replaceText(editor, selection, imgMarkdownText)
+            }, err => {
+              new Notice('[Image Uploader] Upload failed', 5000)
+              console.log(err)
+              // this.replaceText(editor, pastePlaceText, "");
+
+            })
+
+          })
+      })
+    }
   }
 
   onunload(): void {
     this.app.workspace.off('editor-paste', this.pasteFunction);
+    this.app.workspace.off('editor-menu', this.addRightMenu.bind(this));
     console.log("unloading Image Uploader");
   }
 
