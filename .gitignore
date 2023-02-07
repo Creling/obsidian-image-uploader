@@ -6,3 +6,5 @@ yarn.lock
 .npmrc
 dist/
 .vscode/
+/*.sublime-project
+/*.sublime-workspace
