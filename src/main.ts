@@ -4,7 +4,9 @@ import {
   Editor,
   MarkdownView,
   EditorPosition,
-  Menu
+  Menu,
+  FileSystemAdapter,
+  addIcon
 } from "obsidian";
 
 import axios from "axios";
@@ -25,7 +27,8 @@ interface ImageUploaderSettings {
   enableResize: boolean;
 }
 
-import * as FS from 'fs';
+import { existsSync, readFileSync } from 'fs';
+import { basename, extname } from 'path';
 
 const DEFAULT_SETTINGS: ImageUploaderSettings = {
   apiEndpoint: null,
@@ -39,6 +42,9 @@ const DEFAULT_SETTINGS: ImageUploaderSettings = {
 interface pasteFunction {
   (this: HTMLElement, event: ClipboardEvent): void;
 }
+
+const REGEX_LINK = /\!\[([^\[]*?|[^\]]*?)\]\((.*?)\)/g;
+const REGEX_WIKI_LINK = /\!\[\[(.*?)\s*(\|\s*(.*?)\s*)?\]\]/g;
 
 export default class ImageUploader extends Plugin {
   settings: ImageUploaderSettings;
@@ -94,109 +100,188 @@ export default class ImageUploader extends Plugin {
       }
 
       // upload the image
-      const formData = new FormData()
-      const uploadBody = JSON.parse(this.settings.uploadBody)
+      try{
+        const url = await this.uploadImage(editor,file,file.name)
+        const imgMarkdownText = `![](${url})`
+        this.replaceText(editor, pastePlaceText, imgMarkdownText)
+      }catch(e){
+        new Notice('[Image Uploader] Upload unsuccessfully, fall back to default paste!', 5000)
+        this.replaceText(editor,pastePlaceText,'')
+        console.log(mkView.currentMode)
+        mkView.currentMode.clipboardManager.handlePaste(
+          new PasteEventCopy(ev)
+        );
+      }
+    }
+  }
 
-      for (const key in uploadBody) {
-        if (uploadBody[key] == "$FILE") {
-          formData.append(key, file, file.name)
+  menuHandler(menu:Menu,editor:Editor):void{
+    const start = editor.getCursor("from").line;
+    const end = editor.getCursor('to').line;
+    menu.addItem((item)=>{
+      item
+        .setTitle('Upload Image')
+        .setIcon('upload1')
+        .onClick(()=>{
+          this.getImageAndUpload(editor,start,end)
+        })
+    });
+    menu.addItem((item)=>{
+      item
+        .setTitle('Upload Images in File')
+        .setIcon('upload1')
+        .onClick(()=>{
+          this.getImageAndUpload(editor,0,editor.lastLine())
+        })
+    })
+  }
+
+  async getImageAndUpload(editor:Editor,start,end): Promise<void>{
+    let success: number = 0, fail: number = 0, ignore: number = 0;
+    let upload_cache: Map<string,string>= new Map();
+    const file_path = this.app.workspace.getActiveFile().path;
+    const file_cache = this.app.metadataCache;
+    const root_path = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
+
+    // 循环：每一行判断是否有外链存在
+    for(let i:number=start; i<=end; i++){
+      let value = editor.getLine(i);
+      const all_matches = [...value.matchAll(REGEX_LINK)].concat([...value.matchAll(REGEX_WIKI_LINK)])
+
+      for(const link of all_matches){
+        let tag: string, path: string, wiki_mode: boolean, ext: string, name: string, url: string, upload_path: string
+        if(link.length == 3){
+          tag = link[1] || '';  //图片名及设置
+          path = decodeURI(link[2]);  //图片完整链接
+          wiki_mode = false;  //![](),外链或内链，需要解码
+        }else if(link.length == 4){
+          tag = link[3] || '';
+          path = link[1];
+          wiki_mode = true;  //![[]]，内链，不能解码
+        }else {
+          ignore++
+          continue;
         }
-        else {
-          formData.append(key, uploadBody[key])
+
+        const source = link[0];  //原图片链接完整显示的内容
+        const idx = editor.getLine(i).indexOf(source);
+        const from = {line: i,ch: idx} as EditorPosition;
+        const to = {line: i,ch: idx + source.length} as EditorPosition;
+
+        //判断path是否重复，重复的话直接替换结果，无需上传
+        if(upload_cache.has(path)){
+          //直接替换缓存
+          url = upload_cache.get(path)
+          editor.replaceRange(`![${tag}](${url})`, from, to);
+          success++;
+          continue;
+        }
+
+        //判断path是否是本地图片，非本地不要
+        if(path.startsWith('http')){
+          console.log('ignore web image: ' + path);
+          ignore++;
+          continue;
+        }
+
+        //判断path是否存在，不存在不要
+        const tfile = file_cache.getFirstLinkpathDest(path,file_path)
+        if(!tfile){
+          if(!wiki_mode && existsSync(path)){
+            ext = extname(path)
+            name = basename(path)
+            upload_path = path
+          }else{
+            console.log('bad link: ' + path)
+            ignore++;
+            continue;
+          }
+        }else{
+          ext = `.${tfile.extension}`
+          name = `${tfile.basename}${ext}`    
+          upload_path = `${root_path}/${tfile.path}`
+        }
+        
+        //判断ext是否为图片后缀，不是就排除
+        if(!this.isImageFile(ext)){
+          console.log('not a image: ' + path)
+          ignore++;
+          continue;
+        }
+
+        //上传图片
+        try{
+          const blob = new Blob([readFileSync(upload_path)]);
+          url = await this.uploadImage(editor, blob, `${name}`);
+          editor.replaceRange(`![${tag}](${url})`, from, to);
+          upload_cache.set(path,url);
+          success++;
+        }catch(e){
+          console.log(e)
+          fail++;
         }
       }
+    }
+    //光标清空
+    editor.setCursor(editor.getCursor('head'));
+    new Notice(`[Image Uploader] Upload Results:\n${success} successed\n${fail} failed\n${ignore} ignored`, 5000)
+  }
 
+  isImageFile(ext: string): boolean {
+    return ['.png','.jpg','.jpeg','.bmp','.gif','.svg','.tiff','.webp'].includes(ext.toLowerCase())
+  }
+
+  uploadImage(editor: Editor, file: File | Blob, filename: string): Promise<string>{
+    const formData = new FormData()
+    const uploadBody = JSON.parse(this.settings.uploadBody)
+
+    for (const key in uploadBody) {
+      if (uploadBody[key] == "$FILE") {
+        formData.append(key, file, filename)
+      }
+      else {
+        formData.append(key, uploadBody[key])
+      }
+    }
+    return new Promise((resolve,reject)=>{
       axios.post(this.settings.apiEndpoint, formData, {
         "headers": JSON.parse(this.settings.uploadHeader)
       }).then(res => {
         const url = objectPath.get(res.data, this.settings.imageUrlPath)
-        const imgMarkdownText = `![](${url})`
-        this.replaceText(editor, pastePlaceText, imgMarkdownText)
+        resolve(url);
       }, err => {
-        new Notice('[Image Uploader] Upload unsuccessfully, fall back to default paste!', 5000)
-        console.log(err)
-        this.replaceText(editor, pastePlaceText, "");
-        console.log(mkView.currentMode)
-        mkView.currentMode.clipboardManager.handlePaste(
-          new PasteEventCopy(ev)
-          );
+        reject(err);
       })
-    }
+    })
   }
 
   async onload(): Promise<void> {
-    console.log("loading Image Uploader");
     await this.loadSettings();
     // this.setupPasteHandler()
     this.addSettingTab(new ImageUploaderSettingTab(this.app, this));
 
     this.pasteFunction = this.pasteHandler.bind(this);
+    this.menuFunction = this.menuHandler.bind(this);
 
     this.registerEvent(
       this.app.workspace.on('editor-paste', this.pasteFunction)
     );
-
     this.registerEvent(
-      this.app.workspace.on('editor-menu',this.addRightMenu.bind(this))
+      this.app.workspace.on('editor-menu',this.menuFunction)
+    );
+
+    addIcon(
+      'upload1',
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M3 19h18v2H3v-2zm10-9v8h-2v-8H4l8-8 8 8h-7z"/>
+  </svg>`
     )
-  }
-
-  addRightMenu(menu:Menu,editor:Editor):void{
-    const selection = editor.getSelection();
-
-    if(selection){
-      menu.addItem((item)=>{
-        item
-          .setTitle("Upload Image")
-          .onClick((evt)=>{
-            if(selection.lastIndexOf('.')==-1){
-              new Notice('[Image Uploader] No correct image file chosen', 3000)
-              console.log('no image found')
-              return              
-            }
-            const ext = selection.substr(selection.lastIndexOf('.'))
-            if(!FS.existsSync(selection)){
-              new Notice('[Image Uploader] No correct image file chosen', 3000)
-              console.log('no image found')
-              return
-            }
-            //todo: 是否要应用它的resize方法？
-            const blob = new Blob([FS.readFileSync(selection)]) 
-
-            // upload the image
-            const formData = new FormData()
-            const uploadBody = JSON.parse(this.settings.uploadBody)
-
-            for (const key in uploadBody) {
-              if (uploadBody[key] == "$FILE") {
-                formData.append(key, blob,`tmp${ext}`)
-              }
-              else {
-                formData.append(key, uploadBody[key])
-              }
-            }
-
-            axios.post(this.settings.apiEndpoint, formData, {
-              "headers": JSON.parse(this.settings.uploadHeader)
-            }).then(res => {
-              const url = objectPath.get(res.data, this.settings.imageUrlPath)
-              const imgMarkdownText = `${url}`
-              this.replaceText(editor, selection, imgMarkdownText)
-            }, err => {
-              new Notice('[Image Uploader] Upload failed', 5000)
-              console.log(err)
-              // this.replaceText(editor, pastePlaceText, "");
-
-            })
-
-          })
-      })
-    }
+    console.log("loading Image Uploader");
   }
 
   onunload(): void {
     this.app.workspace.off('editor-paste', this.pasteFunction);
-    this.app.workspace.off('editor-menu', this.addRightMenu.bind(this));
+    this.app.workspace.off('editor-menu', this.menuFunction);
     console.log("unloading Image Uploader");
   }
 
