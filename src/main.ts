@@ -43,9 +43,6 @@ interface pasteFunction {
   (this: HTMLElement, event: ClipboardEvent): void;
 }
 
-const REGEX_LINK = /\!\[([^\[]*?|[^\]]*?)\]\((.*?)\)/g;
-const REGEX_WIKI_LINK = /\!\[\[(.*?)\s*(\|\s*(.*?)\s*)?\]\]/g;
-
 export default class ImageUploader extends Plugin {
   settings: ImageUploaderSettings;
   pasteFunction: pasteFunction;
@@ -116,24 +113,27 @@ export default class ImageUploader extends Plugin {
   }
 
   menuHandler(menu:Menu,editor:Editor):void{
-    const start = editor.getCursor("from").line;
-    const end = editor.getCursor('to').line;
-    menu.addItem((item)=>{
-      item
-        .setTitle('Upload Image')
-        .setIcon('upload1')
-        .onClick(()=>{
-          this.getImageAndUpload(editor,start,end)
-        })
-    });
-    menu.addItem((item)=>{
-      item
-        .setTitle('Upload Images in File')
-        .setIcon('upload1')
-        .onClick(()=>{
-          this.getImageAndUpload(editor,0,editor.lastLine())
-        })
-    })
+    if(editor.somethingSelected()){
+      const start = editor.getCursor("from").line;
+      const end = editor.getCursor('to').line;
+      menu.addItem((item)=>{
+        item
+          .setTitle('Upload Image in Selection')
+          .setIcon('upload1')
+          .onClick(()=>{
+            this.getImageAndUpload(editor,start,end)
+          })
+      });
+    }else{
+      menu.addItem((item)=>{
+        item
+          .setTitle('Upload Image in File')
+          .setIcon('upload1')
+          .onClick(()=>{
+            this.getImageAndUpload(editor,0,editor.lastLine())
+          })
+      })
+    }
   }
 
   async getImageAndUpload(editor:Editor,start,end): Promise<void>{
@@ -142,8 +142,9 @@ export default class ImageUploader extends Plugin {
     const file_path = this.app.workspace.getActiveFile().path;
     const file_cache = this.app.metadataCache;
     const root_path = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
-
-    // 循环：每一行判断是否有外链存在
+    const REGEX_LINK = /\!\[([^\[]*?|[^\]]*?)\]\((.*?)\)/g;
+    const REGEX_WIKI_LINK = /\!\[\[(.*?)\s*(\|\s*(.*?)\s*)?\]\]/g;
+    
     for(let i:number=start; i<=end; i++){
       let value = editor.getLine(i);
       const all_matches = [...value.matchAll(REGEX_LINK)].concat([...value.matchAll(REGEX_WIKI_LINK)])
@@ -151,24 +152,24 @@ export default class ImageUploader extends Plugin {
       for(const link of all_matches){
         let tag: string, path: string, wiki_mode: boolean, ext: string, name: string, url: string, upload_path: string
         if(link.length == 3){
-          tag = link[1] || '';  //图片名及设置
-          path = decodeURI(link[2]);  //图片完整链接
-          wiki_mode = false;  //![](),外链或内链，需要解码
+          tag = link[1] || '';
+          path = decodeURI(link[2]);
+          wiki_mode = false;  //standard markdown link: ![]()
         }else if(link.length == 4){
           tag = link[3] || '';
           path = link[1];
-          wiki_mode = true;  //![[]]，内链，不能解码
+          wiki_mode = true;  //wiki link: ![[]]
         }else {
           ignore++
           continue;
         }
 
-        const source = link[0];  //原图片链接完整显示的内容
+        const source = link[0];  //the full link text
         const idx = editor.getLine(i).indexOf(source);
         const from = {line: i,ch: idx} as EditorPosition;
         const to = {line: i,ch: idx + source.length} as EditorPosition;
 
-        //判断path是否重复，重复的话直接替换结果，无需上传
+        //if path is cached，just read from cache, no need to upload
         if(upload_cache.has(path)){
           //直接替换缓存
           url = upload_cache.get(path)
@@ -177,14 +178,14 @@ export default class ImageUploader extends Plugin {
           continue;
         }
 
-        //判断path是否是本地图片，非本地不要
+        //check if path is web link
         if(path.startsWith('http')){
           console.log('ignore web image: ' + path);
           ignore++;
           continue;
         }
 
-        //判断path是否存在，不存在不要
+        //check if path can be accessed. check both internal and external path 
         const tfile = file_cache.getFirstLinkpathDest(path,file_path)
         if(!tfile){
           if(!wiki_mode && existsSync(path)){
@@ -202,14 +203,14 @@ export default class ImageUploader extends Plugin {
           upload_path = `${root_path}/${tfile.path}`
         }
         
-        //判断ext是否为图片后缀，不是就排除
+        //check if the file is image file
         if(!this.isImageFile(ext)){
           console.log('not a image: ' + path)
           ignore++;
           continue;
         }
 
-        //上传图片
+        //upload the image
         try{
           const blob = new Blob([readFileSync(upload_path)]);
           url = await this.uploadImage(editor, blob, `${name}`);
@@ -222,7 +223,7 @@ export default class ImageUploader extends Plugin {
         }
       }
     }
-    //光标清空
+    // clear selection
     editor.setCursor(editor.getCursor('head'));
     new Notice(`[Image Uploader] Upload Results:\n${success} successed\n${fail} failed\n${ignore} ignored`, 5000)
   }
