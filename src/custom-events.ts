@@ -8,10 +8,16 @@
 
 export class PasteEventCopy extends ClipboardEvent {
   constructor(originalEvent: ClipboardEvent) {
-    const { files } = originalEvent.clipboardData;
+    const clipboardData = originalEvent?.clipboardData;
+    if (!clipboardData) {
+      super("paste");
+      return;
+    }
+
+    const { files } = clipboardData;
     const dt = new DataTransfer();
     for (let i = 0; i < files.length; i += 1) {
-      dt.items.add(files.item(i));
+      dt.items.add(files.item(i)!);
     }
     super("paste", { clipboardData: dt });
   }

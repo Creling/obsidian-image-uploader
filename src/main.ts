@@ -4,6 +4,7 @@ import {
   Editor,
   MarkdownView,
   EditorPosition,
+  normalizePath,
 } from "obsidian";
 
 import axios from "axios";
@@ -14,6 +15,7 @@ import Compressor from 'compressorjs';
 import {
   PasteEventCopy,
 } from './custom-events';
+import { resolve } from "path";
 
 
 // Avoid the error: Property 'clipboardManager' does not exist on type 'MarkdownSubView'
@@ -99,13 +101,29 @@ export default class ImageUploader extends Plugin {
         file = compressedFile as File
       }
 
-      // upload the image
+      this.uploadImage(file).then(url => {
+        const imgMarkdownText = `![](${url})`
+        this.replaceText(editor, pastePlaceText, imgMarkdownText)
+      }, err => {
+        new Notice('[Image Uploader] Upload unsuccessfully, fall back to default paste!', 5000)
+        console.log(err)
+        this.replaceText(editor, pastePlaceText, "");
+        mkView.currentMode.clipboardManager.handlePaste(
+          new PasteEventCopy(ev)
+        );
+      })
+    }
+  }
+
+  async uploadImage(image: File): Promise<string> {
+
+    return new Promise((resolve, reject) => {
       const formData = new FormData()
       const uploadBody = JSON.parse(this.settings.uploadBody)
 
       for (const key in uploadBody) {
         if (uploadBody[key] == "$FILE") {
-          formData.append(key, file, file.name)
+          formData.append(key, image, image.name)
         }
         else {
           formData.append(key, uploadBody[key])
@@ -116,17 +134,86 @@ export default class ImageUploader extends Plugin {
         "headers": JSON.parse(this.settings.uploadHeader)
       }).then(res => {
         const url = objectPath.get(res.data, this.settings.imageUrlPath)
-        const imgMarkdownText = `![](${url})`
-        this.replaceText(editor, pastePlaceText, imgMarkdownText)
+        resolve(url)
       }, err => {
-        new Notice('[Image Uploader] Upload unsuccessfully, fall back to default paste!', 5000)
-        console.log(err)
-        this.replaceText(editor, pastePlaceText, "");
-        console.log(mkView.currentMode)
-        mkView.currentMode.clipboardManager.handlePaste(
-          new PasteEventCopy(ev)
-        );
+        reject(err)
       })
+    })
+  }
+
+  async uploadLocalImages(): Promise<void> {
+    // Get the current active MarkdownView
+    const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!markdownView) return;
+    // Get Editor
+    const editor = markdownView.editor;
+    // Get all the text
+    const lines = editor.getValue().split("\n");
+
+    const allFiles = this.app.vault.getFiles();
+
+    let imageNameAndLinks: { [key: string]: string }[] = [];
+    let imageNames: string[] = [];
+
+    for (let line of lines) {
+      // Match ![[...<Image Name>.<ext>]] or ![](...<Image Name>.<ext>)
+      const imageLinks = line.match(/(!\[\[.+\]\])|(!\[.+\(.+\))/gm);
+      if (!imageLinks) continue;
+
+      for (const imageLink of imageLinks) {
+
+        // Match ...<Image Name>.<ext>
+        let imageInfo = imageLink.match(/(?:\[\[|!\[]\()(?<uri>.*?)(?:\)|\]\])/);
+        if (!imageInfo) continue;
+
+        let imageURI = imageInfo?.groups?.uri!;
+
+        if (imageURI.startsWith("http")) continue
+
+        // Get <Image Name>.<ext>
+        const imageName = decodeURIComponent(imageURI.split("/").pop()!);
+        imageNameAndLinks.push({ [imageName]: imageLink });
+        imageNames.push(imageName);
+      }
+
+      const targetImages = allFiles.filter(file => {
+        return imageNames.includes(file.name);
+      });
+
+      for (const targetImage of targetImages) {
+        const data = await this.app.vault.adapter.readBinary(normalizePath(targetImage.path));
+        const blob = new Blob([data]);
+        const file = new File([blob], targetImage.name, { type: 'image/png' });
+
+        this.uploadImage(file).then(url => {
+          const imgMarkdownText = `![](${url})`
+          const imageNameAndLink = imageNameAndLinks.find((item: { [key: string]: string }) => {
+            return Object.keys(item)[0] === targetImage.name;
+          });
+          if (imageNameAndLink) {
+            const imageLink = imageNameAndLink[targetImage.name];
+            this.replaceText(editor, imageLink, imgMarkdownText);
+          }
+        }, err => {
+          new Notice('[Image Uploader] Upload unsuccessfully', 5000)
+          console.log(err)
+        })
+      }
+
+
+      // const data = await this.app.vault.adapter.readBinary(imagePath);
+      // const blob = new Blob([data]);
+      // const file = new File([blob], imageName, { type: 'image/png' });
+
+      // this.uploadImage(file).then(url => {
+      //   const imgMarkdownText = `![](${url})`
+      //   this.replaceText(editor, imageLink, imgMarkdownText)
+      // }, err => {
+      //   new Notice('[Image Uploader] Upload unsuccessfully, fall back to default paste!', 5000)
+      //   console.log(err)
+
+      // })
+
     }
   }
 
@@ -141,6 +228,12 @@ export default class ImageUploader extends Plugin {
     this.registerEvent(
       this.app.workspace.on('editor-paste', this.pasteFunction)
     );
+
+    this.addCommand({
+      id: 'upload-all-local-images',
+      name: 'Upload All Local Images in This Page',
+      callback: this.uploadLocalImages.bind(this),
+    });
   }
 
   onunload(): void {
