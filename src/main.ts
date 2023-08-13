@@ -15,6 +15,19 @@ import {
   PasteEventCopy,
 } from './custom-events';
 
+
+// Avoid the error: Property 'clipboardManager' does not exist on type 'MarkdownSubView'
+declare module 'obsidian' {
+  interface MarkdownSubView {
+    clipboardManager: ClipboardManager
+  }
+}
+
+interface ClipboardManager {
+  handlePaste(e: ClipboardEvent): void
+  handleDrop(e: DragEvent): void
+}
+
 interface ImageUploaderSettings {
   apiEndpoint: string;
   uploadHeader: string;
@@ -25,10 +38,10 @@ interface ImageUploaderSettings {
 }
 
 const DEFAULT_SETTINGS: ImageUploaderSettings = {
-  apiEndpoint: null,
-  uploadHeader: null,
+  apiEndpoint: "",
+  uploadHeader: "",
   uploadBody: "{\"image\": \"$FILE\"}",
-  imageUrlPath: null,
+  imageUrlPath: "",
   maxWidth: 4096,
   enableResize: false,
 };
@@ -62,10 +75,10 @@ export default class ImageUploader extends Plugin {
       return;
     }
 
-    let file = ev.clipboardData.files[0];
+    let clipboardData = ev.clipboardData?.files[0];
     const imageType = /image.*/;
-    if (file.type.match(imageType)) {
-
+    if (clipboardData && clipboardData.type.match(imageType)) {
+      let file: File = clipboardData!;
       ev.preventDefault();
 
       // set the placeholder text
@@ -112,7 +125,7 @@ export default class ImageUploader extends Plugin {
         console.log(mkView.currentMode)
         mkView.currentMode.clipboardManager.handlePaste(
           new PasteEventCopy(ev)
-          );
+        );
       })
     }
   }
